@@ -1,3 +1,4 @@
+use std::thread;
 use std::{
     io::{self, BufRead, Write},
     net::{TcpListener, TcpStream},
@@ -40,7 +41,16 @@ fn send_response(stream: &mut TcpStream, response: Response, content: Option<Str
     stream.flush().unwrap();
 }
 
+pub struct ThreadPool;
+
+impl ThreadPool {
+    pub fn new(size: usize) -> ThreadPool {
+        ThreadPool
+    }
+}
+
 fn handle_client_connection(mut stream: TcpStream) {
+    println!("Request received");
     let mut reader = io::BufReader::new(&stream);
     let received: Vec<u8> = reader.fill_buf().unwrap().to_vec();
 
@@ -70,10 +80,15 @@ fn handle_client_connection(mut stream: TcpStream) {
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+    // let pool = ThreadPool::new(4);
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => handle_client_connection(stream),
+            Ok(stream) => {
+                thread::spawn(move || {
+                    handle_client_connection(stream);
+                });
+            }
             Err(e) => {
                 println!("error: {}", e);
             }
