@@ -1,15 +1,19 @@
+use std::collections::HashMap;
+use std::env::args;
 use std::thread;
 use std::{
-    io::{self, BufRead, Write},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
 };
 
 const SUCCESS_RESPONSE: &str = "HTTP/1.1 200 OK\r\n";
 const NOT_FOUND_RESPONSE: &str = "HTTP/1.1 404 NOT FOUND\r\n";
+const INTERNAL_SERVER_ERROR_RESPONSE: &str = "HTTP/1.1 500 INTERNAL SERVER ERROR\r\n";
 
 enum Response {
     Success,
     NotFound,
+    InternalServerError,
 }
 
 impl Response {
@@ -17,76 +21,139 @@ impl Response {
         match self {
             Response::Success => SUCCESS_RESPONSE.to_string(),
             Response::NotFound => NOT_FOUND_RESPONSE.to_string(),
+            Response::InternalServerError => INTERNAL_SERVER_ERROR_RESPONSE.to_string(),
         }
     }
 }
 
-fn send_response(stream: &mut TcpStream, response: Response, content: Option<String>) {
+fn parse_request(request: &str) -> HashMap<&str, &str> {
+    let mut result = HashMap::new();
+    let mut lines = request.lines();
+
+    let first_line = lines.next().unwrap();
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    result.insert("method", parts[0]);
+    result.insert("path", parts[1]);
+
+    for line in lines {
+        let parts: Vec<&str> = line.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+            result.insert(key, value);
+        }
+    }
+
+    result
+}
+
+fn send_response<T: AsRef<[u8]>>(
+    stream: &mut TcpStream,
+    response: Response,
+    content: Option<T>,
+    content_type: Option<&str>,
+) {
     let response_str = response.to_string();
-    let content_str = content.unwrap_or_default();
     let full_response;
 
-    if content_str.is_empty() {
-        full_response = format!("{}\r\n", response_str);
-    } else {
+    if let Some(content_data) = content {
+        let content_type_str = content_type.unwrap_or("text/plain");
         full_response = format!(
-            "{}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}\r\n\r\n",
+            "{}Content-Type: {}\r\nContent-Length: {}\r\n\r\n{}\r\n\r\n",
             response_str,
-            content_str.len(),
-            content_str
-        );
+            content_type_str,
+            content_data.as_ref().len(),
+            String::from_utf8_lossy(content_data.as_ref())
+        )
+    } else {
+        full_response = format!("{}\r\n", response_str)
     }
 
     stream.write_all(full_response.as_bytes()).unwrap();
     stream.flush().unwrap();
 }
 
-pub struct ThreadPool;
+fn get_file_path(stream: &mut TcpStream, path: &str) {
+    let dirpath = args().nth(2).unwrap_or(".".to_string());
+    let file_name = path.split("/files/").collect::<Vec<&str>>()[1];
 
-impl ThreadPool {
-    pub fn new(size: usize) -> ThreadPool {
-        ThreadPool
+    let file = std::fs::File::open(dirpath + "/" + file_name);
+
+    match file {
+        Ok(mut file) => {
+            let mut contents = String::new();
+            let file_size = file.read_to_string(&mut contents);
+            if file_size.is_err() {
+                return send_response::<String>(stream, Response::InternalServerError, None, None);
+            }
+
+            return send_response(
+                stream,
+                Response::Success,
+                Some(contents),
+                Some("application/octet-stream"),
+            );
+        }
+        Err(_) => return send_response::<String>(stream, Response::NotFound, None, None),
     }
 }
 
-fn handle_client_connection(mut stream: TcpStream) {
-    println!("Request received");
-    let mut reader = io::BufReader::new(&stream);
-    let received: Vec<u8> = reader.fill_buf().unwrap().to_vec();
+fn user_agent_route(stream: &mut TcpStream, user_agent: Option<&str>) {
+    if user_agent.is_none() {
+        send_response::<String>(stream, Response::Success, None, None);
+        return;
+    }
+    send_response(
+        stream,
+        Response::Success,
+        user_agent.map(|s| s.to_string()),
+        Some("text/plain"),
+    );
+}
 
-    let x = String::from_utf8(received).unwrap();
+fn index_route(stream: &mut TcpStream) {
+    send_response::<String>(stream, Response::Success, None, None);
+}
 
-    let path = x.split(" ").collect::<Vec<&str>>()[1];
+fn echo_route(stream: &mut TcpStream, content: Option<String>) {
+    send_response(stream, Response::Success, content, Some("text/plain"));
+}
+
+fn not_found_route(stream: &mut TcpStream) {
+    send_response::<String>(stream, Response::NotFound, None, None);
+}
+
+fn handle_client_connection(mut stream: std::net::TcpStream) {
+    let mut buffer = [0; 4096];
+    stream.read(&mut buffer).unwrap();
+    let request = String::from_utf8_lossy(&buffer[..]);
+    let request = request.to_string();
+
+    let parsed_request = parse_request(&request);
+
+    let path = parsed_request["path"];
+    let _ = parsed_request["method"];
 
     match path {
-        "/" => send_response(&mut stream, Response::Success, None),
-        "/user-agent" => {
-            let user_agent = reader
-                .lines()
-                .find(|line| line.as_ref().unwrap().starts_with("User-Agent: "))
-                .unwrap()
-                .unwrap()
-                .replace("User-Agent: ", "");
-            send_response(&mut stream, Response::Success, Some(user_agent))
-        }
-        _ if path.starts_with("/echo") => send_response(
+        "/" => index_route(&mut stream),
+        "/user-agent" => user_agent_route(&mut stream, Some(parsed_request["User-Agent"])),
+        p if p.starts_with("/files") => get_file_path(&mut stream, path),
+        p if p.starts_with("/echo") => echo_route(
             &mut stream,
-            Response::Success,
-            Some(path.split("/echo/").collect::<Vec<&str>>()[1].to_string()),
+            Some(p.split("/echo/").collect::<Vec<&str>>()[1].to_string()),
         ),
-        _ => send_response(&mut stream, Response::NotFound, None),
+        _ => not_found_route(&mut stream),
     }
 }
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-    // let pool = ThreadPool::new(4);
 
     for stream in listener.incoming() {
         match stream {
-            Ok(stream) => {
+            Ok(_stream) => {
                 thread::spawn(move || {
-                    handle_client_connection(stream);
+                    handle_client_connection(_stream);
                 });
             }
             Err(e) => {
@@ -95,4 +162,11 @@ fn main() {
         }
     }
 }
+
+/*
+TODO:
+- max 4 threads
+- clean up functions and code - split
+
+*/
 
