@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env::args;
+use std::fs::File;
 use std::thread;
 use std::{
     io::{Read, Write},
@@ -9,11 +10,13 @@ use std::{
 const SUCCESS_RESPONSE: &str = "HTTP/1.1 200 OK\r\n";
 const NOT_FOUND_RESPONSE: &str = "HTTP/1.1 404 NOT FOUND\r\n";
 const INTERNAL_SERVER_ERROR_RESPONSE: &str = "HTTP/1.1 500 INTERNAL SERVER ERROR\r\n";
+const CREATED_RESPONSE: &str = "HTTP/1.1 201 CREATED\r\n";
 
 enum Response {
     Success,
     NotFound,
     InternalServerError,
+    Created,
 }
 
 impl Response {
@@ -22,12 +25,14 @@ impl Response {
             Response::Success => SUCCESS_RESPONSE.to_string(),
             Response::NotFound => NOT_FOUND_RESPONSE.to_string(),
             Response::InternalServerError => INTERNAL_SERVER_ERROR_RESPONSE.to_string(),
+            Response::Created => CREATED_RESPONSE.to_string(),
         }
     }
 }
 
-fn parse_request(request: &str) -> HashMap<&str, &str> {
+fn parse_request(request: &str) -> (HashMap<&str, &str>, String) {
     let mut result = HashMap::new();
+    let mut body = String::new();
     let mut lines = request.lines();
 
     let first_line = lines.next().unwrap();
@@ -35,7 +40,19 @@ fn parse_request(request: &str) -> HashMap<&str, &str> {
     result.insert("method", parts[0]);
     result.insert("path", parts[1]);
 
+    let mut header_complete = false;
     for line in lines {
+        if header_complete {
+            body.push_str(line);
+            body.push_str("\n");
+            continue;
+        }
+
+        if line.is_empty() {
+            header_complete = true;
+            continue;
+        }
+
         let parts: Vec<&str> = line.splitn(2, ':').collect();
         if parts.len() == 2 {
             let key = parts[0].trim();
@@ -44,7 +61,7 @@ fn parse_request(request: &str) -> HashMap<&str, &str> {
         }
     }
 
-    result
+    (result, body)
 }
 
 fn send_response<T: AsRef<[u8]>>(
@@ -71,6 +88,27 @@ fn send_response<T: AsRef<[u8]>>(
 
     stream.write_all(full_response.as_bytes()).unwrap();
     stream.flush().unwrap();
+}
+
+fn save_file_path(stream: &mut TcpStream, path: &str, content: &str) {
+    let dirpath = args().nth(2).unwrap_or(".".to_string());
+    let file_name = path.split("/files/").collect::<Vec<&str>>()[1];
+
+    let cleaned_content = content.replace("\0", "");
+
+    match File::create(format!("{}/{}", dirpath, file_name)) {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(cleaned_content.as_bytes()) {
+                println!("Failed to write to file: {}", e);
+                return send_response::<String>(stream, Response::InternalServerError, None, None);
+            }
+            return send_response::<String>(stream, Response::Created, None, None);
+        }
+        Err(e) => {
+            println!("Failed to create file: {}", e);
+            return send_response::<String>(stream, Response::InternalServerError, None, None);
+        }
+    }
 }
 
 fn get_file_path(stream: &mut TcpStream, path: &str) {
@@ -127,16 +165,18 @@ fn handle_client_connection(mut stream: std::net::TcpStream) {
     let mut buffer = [0; 4096];
     stream.read(&mut buffer).unwrap();
     let request = String::from_utf8_lossy(&buffer[..]);
-    let request = request.to_string();
 
-    let parsed_request = parse_request(&request);
+    let (parsed_request, body) = parse_request(&request);
 
     let path = parsed_request["path"];
-    let _ = parsed_request["method"];
+    let method = parsed_request["method"];
 
     match path {
         "/" => index_route(&mut stream),
         "/user-agent" => user_agent_route(&mut stream, Some(parsed_request["User-Agent"])),
+        _ if path.starts_with("/files") && method == "POST" => {
+            save_file_path(&mut stream, path, &body)
+        }
         p if p.starts_with("/files") => get_file_path(&mut stream, path),
         p if p.starts_with("/echo") => echo_route(
             &mut stream,
