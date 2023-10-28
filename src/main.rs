@@ -205,10 +205,3 @@ fn main() {
     }
 }
 
-/*
-TODO:
-- max 4 threads
-- clean up functions and code - split
-
-*/
-
