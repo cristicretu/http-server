@@ -96,6 +96,8 @@ fn save_file_path(stream: &mut TcpStream, path: &str, content: &str) {
 
     let cleaned_content = content.replace("\0", "");
 
+    let cleaned_content = cleaned_content.trim_end_matches('\n');
+
     match File::create(format!("{}/{}", dirpath, file_name)) {
         Ok(mut file) => {
             if let Err(e) = file.write_all(cleaned_content.as_bytes()) {
@@ -162,9 +164,9 @@ fn not_found_route(stream: &mut TcpStream) {
 }
 
 fn handle_client_connection(mut stream: std::net::TcpStream) {
-    let mut buffer = [0; 4096];
-    stream.read(&mut buffer).unwrap();
-    let request = String::from_utf8_lossy(&buffer[..]);
+    let mut buffer = [0u8; 1024];
+    let n = stream.read(&mut buffer).unwrap();
+    let request = String::from_utf8_lossy(&buffer[0..n]);
 
     let (parsed_request, body) = parse_request(&request);
 
