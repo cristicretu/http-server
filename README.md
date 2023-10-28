@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/m1guelpf/tinyvector/assets/23558090/512ff4ad-49fd-43ec-b3bd-57365b920078" alt="tinyvector logo">
+  <img src="https://github.com/cristicretu/http-server/assets/45521157/a8d228c7-45ed-4f0a-878a-9011805bbf26" alt="smolserver logo">
 </p>
 
 <p align="center">
